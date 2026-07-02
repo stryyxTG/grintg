@@ -368,7 +368,13 @@ def _worker_counts(config: Config, worker) -> tuple[int, int]:
     return nereg_count, reg_count
 
 
-async def _show_worker_home_callback(callback: CallbackQuery, config: Config, worker) -> None:
+async def _show_worker_home_callback(
+    callback: CallbackQuery,
+    config: Config,
+    worker,
+    *,
+    answer_text: str | None = None,
+) -> None:
     nereg_count, reg_count = _worker_counts(config, worker)
     proxy_remaining = count_worker_proxies(config, worker["id"], "assigned")
     proxy_total = count_worker_proxies(config, worker["id"])
@@ -386,7 +392,7 @@ async def _show_worker_home_callback(callback: CallbackQuery, config: Config, wo
             reg_count=reg_count,
         ),
     )
-    await callback.answer()
+    await callback.answer(answer_text)
 
 
 async def _show_worker_home_message(message: Message, config: Config, worker) -> None:
@@ -1202,18 +1208,8 @@ async def confirm_worker_account_stage(callback: CallbackQuery, config: Config, 
     if not account or not _worker_can_access_account(account, current_worker):
         await callback.answer("Аккаунт недоступен.", show_alert=True)
         return
-    new_stage = "reg" if account.account_stage == "reg" else "nereg"
-    await callback.message.edit_text(
-        _worker_account_detail_text(account),
-        reply_markup=worker_self_account_detail_menu(
-            account.id,
-            stage=new_stage,
-            page=0,
-            account_stage=account.account_stage,
-        ),
-    )
     done = "Аккаунт перенесен в РЕГ." if target_stage == "reg" else "Аккаунт перенесен в НЕРЕГ."
-    await callback.answer(done)
+    await _show_worker_home_callback(callback, config, current_worker, answer_text=done)
 
 
 @router.callback_query(F.data.startswith("worker:self_phone:"))
