@@ -175,9 +175,6 @@ async def _fetch_worker_telegram_name(bot: Bot, telegram_id: int) -> str | None:
         chat = await bot.get_chat(telegram_id)
     except Exception:
         return None
-    username = getattr(chat, "username", None)
-    if username:
-        return f"@{username}"
     parts = [
         getattr(chat, "first_name", None),
         getattr(chat, "last_name", None),
@@ -1805,7 +1802,7 @@ async def add_worker_finish_manual(message: Message, state: FSMContext, config: 
     data = await state.get_data()
     name = _clean_worker_label(message.text or "") or data.get("worker_suggested_name")
     if not name:
-        await message.answer("Отправь подпись текстом. Например: @username или Вася.")
+        await message.answer("Отправь подпись текстом. Например: Вася или Артем.")
         return
     await _create_worker_with_name(message, state, config, str(name))
 
