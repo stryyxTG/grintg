@@ -308,7 +308,59 @@ def confirm_delete_worker_menu(worker_id: int) -> InlineKeyboardMarkup:
 def proxies_menu() -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     builder.button(text="Добавить прокси", callback_data="proxies:add")
+    builder.button(text="Выдать воркеру", callback_data="proxies:assign")
     builder.button(text="Назад", callback_data="main:menu")
+    builder.adjust(1)
+    return builder.as_markup()
+
+
+def proxies_storage_keyboard(proxies: Sequence) -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    for proxy in proxies:
+        label = str(proxy["proxy"])
+        if len(label) > 48:
+            label = f"{label[:45]}..."
+        builder.button(text=f"#{proxy['id']} | {label}", callback_data=f"proxy:open:{proxy['id']}")
+    builder.button(text="Добавить прокси", callback_data="proxies:add")
+    builder.button(text="Выдать воркеру", callback_data="proxies:assign")
+    builder.button(text="Назад", callback_data="main:menu")
+    builder.adjust(*([1] * len(proxies)), 1, 1, 1)
+    return builder.as_markup()
+
+
+def proxy_detail_keyboard(proxy_id: int) -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    builder.button(text="Выдать воркеру", callback_data="proxies:assign")
+    builder.button(text="Назад к прокси", callback_data="proxies:menu")
+    builder.adjust(1)
+    return builder.as_markup()
+
+
+def proxy_worker_select_keyboard(workers: Sequence) -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    for worker in workers:
+        builder.button(text=worker["name"], callback_data=f"proxies:assign_worker:{worker['id']}")
+    builder.button(text="Отмена", callback_data="proxies:menu")
+    builder.adjust(*([1] * len(workers)), 1)
+    return builder.as_markup()
+
+
+def proxy_amount_keyboard(available: int) -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    for amount in (1, 2, 3, 5, 10):
+        if amount <= available:
+            builder.button(text=str(amount), callback_data=f"proxies:assign_amount:{amount}")
+    builder.button(text=f"Все {available}", callback_data=f"proxies:assign_amount:{available}")
+    builder.button(text="Отмена", callback_data="proxies:menu")
+    builder.adjust(3, 2, 1, 1)
+    return builder.as_markup()
+
+
+def worker_proxy_menu(*, remaining: int, total: int) -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    builder.button(text=f"Получить прокси | {remaining}/{total}", callback_data="worker:self_proxy:get")
+    builder.button(text="Обновить", callback_data="worker:self_proxy:menu")
+    builder.button(text="Мое хранилище", callback_data="worker:self:menu")
     builder.adjust(1)
     return builder.as_markup()
 
@@ -317,6 +369,7 @@ def worker_self_menu(*, nereg_count: int, reg_count: int) -> InlineKeyboardMarku
     builder = InlineKeyboardBuilder()
     builder.button(text=f"НЕРЕГ | {nereg_count}", callback_data="worker:self:page:nereg:0")
     builder.button(text=f"РЕГ | {reg_count}", callback_data="worker:self:page:reg:0")
+    builder.button(text="Прокси", callback_data="worker:self_proxy:menu")
     builder.button(text="Обновить", callback_data="worker:self:menu")
     builder.adjust(1)
     return builder.as_markup()

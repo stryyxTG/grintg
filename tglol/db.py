@@ -314,7 +314,8 @@ def worker_exists(config: Config, worker_id: int) -> bool:
 def delete_worker(config: Config, worker_id: int) -> None:
     with connect(config) as connection:
         connection.execute("UPDATE accounts SET worker_id = NULL, department_id = NULL WHERE worker_id = ?", (worker_id,))
-        connection.execute("UPDATE proxies SET worker_id = NULL WHERE worker_id = ?", (worker_id,))
+        connection.execute("UPDATE proxies SET worker_id = NULL, status = 'stored' WHERE worker_id = ? AND status = 'assigned'", (worker_id,))
+        connection.execute("UPDATE proxies SET worker_id = NULL WHERE worker_id = ? AND status = 'used'", (worker_id,))
         connection.execute("DELETE FROM workers WHERE id = ?", (worker_id,))
 
 
@@ -335,20 +336,62 @@ def add_proxy(config: Config, proxy: str, created_at: str) -> int:
         return int(cursor.lastrowid)
 
 
-def list_proxies(config: Config) -> list[sqlite3.Row]:
+def list_available_proxies(config: Config, limit: int = 50) -> list[sqlite3.Row]:
     with connect(config) as connection:
-        return connection.execute("SELECT * FROM proxies ORDER BY id DESC LIMIT 50").fetchall()
+        return connection.execute(
+            "SELECT * FROM proxies WHERE worker_id IS NULL AND status = 'stored' ORDER BY id ASC LIMIT ?",
+            (limit,),
+        ).fetchall()
 
 
-def proxy_exists(config: Config, proxy_id: int) -> bool:
+def count_available_proxies(config: Config) -> int:
     with connect(config) as connection:
-        row = connection.execute("SELECT 1 FROM proxies WHERE id = ?", (proxy_id,)).fetchone()
-    return row is not None
-
-
-def assign_proxy_to_worker(config: Config, proxy_id: int, worker_id: int | None) -> None:
-    with connect(config) as connection:
-        connection.execute(
-            "UPDATE proxies SET worker_id = ? WHERE id = ?",
-            (worker_id, proxy_id),
+        return int(
+            connection.execute(
+                "SELECT COUNT(*) FROM proxies WHERE worker_id IS NULL AND status = 'stored'",
+            ).fetchone()[0]
         )
+
+
+def count_worker_proxies(config: Config, worker_id: int, status: str | None = None) -> int:
+    params: list[Any] = [worker_id]
+    clause = "worker_id = ?"
+    if status is not None:
+        clause += " AND status = ?"
+        params.append(status)
+    with connect(config) as connection:
+        return int(connection.execute(f"SELECT COUNT(*) FROM proxies WHERE {clause}", params).fetchone()[0])
+
+
+def assign_available_proxies_to_worker(config: Config, worker_id: int, amount: int) -> int:
+    if amount <= 0:
+        return 0
+    with connect(config) as connection:
+        rows = connection.execute(
+            "SELECT id FROM proxies WHERE worker_id IS NULL AND status = 'stored' ORDER BY id ASC LIMIT ?",
+            (amount,),
+        ).fetchall()
+        ids = [row["id"] for row in rows]
+        if not ids:
+            return 0
+        placeholders = ", ".join("?" for _ in ids)
+        cursor = connection.execute(
+            f"UPDATE proxies SET worker_id = ?, status = 'assigned' WHERE id IN ({placeholders})",
+            (worker_id, *ids),
+        )
+        return int(cursor.rowcount or 0)
+
+
+def pop_worker_proxy(config: Config, worker_id: int) -> sqlite3.Row | None:
+    with connect(config) as connection:
+        row = connection.execute(
+            "SELECT * FROM proxies WHERE worker_id = ? AND status = 'assigned' ORDER BY id ASC LIMIT 1",
+            (worker_id,),
+        ).fetchone()
+        if not row:
+            return None
+        connection.execute(
+            "UPDATE proxies SET status = 'used' WHERE id = ?",
+            (row["id"],),
+        )
+        return row

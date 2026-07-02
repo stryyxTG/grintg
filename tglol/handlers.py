@@ -19,8 +19,10 @@ from tglol.db import (
     add_proxy,
     add_worker,
     assign_account_to_worker,
-    assign_proxy_to_worker,
+    assign_available_proxies_to_worker,
+    count_available_proxies,
     count_accounts_by_stage,
+    count_worker_proxies,
     delete_account_row,
     delete_accounts_by_scope,
     delete_worker,
@@ -29,10 +31,10 @@ from tglol.db import (
     get_worker_by_telegram_id,
     list_accounts,
     list_accounts_by_scope,
-    list_proxies,
+    list_available_proxies,
     list_workers,
     move_accounts_to_common_by_scope,
-    proxy_exists,
+    pop_worker_proxy,
     set_account_worker_and_stage,
     set_account_stage,
     worker_exists,
@@ -59,8 +61,13 @@ from tglol.keyboards import (
     digit_code_keyboard,
     main_menu,
     placeholder_menu,
+    proxies_storage_keyboard,
+    proxy_amount_keyboard,
+    proxy_detail_keyboard,
+    proxy_worker_select_keyboard,
     proxies_menu,
     skip_json_menu,
+    worker_proxy_menu,
     worker_account_sections_menu,
     worker_detail_menu,
     worker_self_account_detail_menu,
@@ -106,6 +113,7 @@ class AccessMiddleware(BaseMiddleware):
                     or callback_data.startswith("worker:self_code:")
                     or callback_data.startswith("worker:self_phone:")
                     or callback_data.startswith("worker:self_stage_")
+                    or callback_data.startswith("worker:self_proxy:")
                 )
                 if allowed:
                     return await handler(event, data)
@@ -362,11 +370,14 @@ def _worker_counts(config: Config, worker) -> tuple[int, int]:
 
 async def _show_worker_home_callback(callback: CallbackQuery, config: Config, worker) -> None:
     nereg_count, reg_count = _worker_counts(config, worker)
+    proxy_remaining = count_worker_proxies(config, worker["id"], "assigned")
+    proxy_total = count_worker_proxies(config, worker["id"])
     text = (
         f"Рабочая панель\n"
         f"Воркер: {_worker_name(worker)}\n\n"
         f"НЕРЕГ: {nereg_count}\n"
-        f"РЕГ: {reg_count}"
+        f"РЕГ: {reg_count}\n"
+        f"Прокси: {proxy_remaining}/{proxy_total}"
     )
     await callback.message.edit_text(
         text,
@@ -380,11 +391,14 @@ async def _show_worker_home_callback(callback: CallbackQuery, config: Config, wo
 
 async def _show_worker_home_message(message: Message, config: Config, worker) -> None:
     nereg_count, reg_count = _worker_counts(config, worker)
+    proxy_remaining = count_worker_proxies(config, worker["id"], "assigned")
+    proxy_total = count_worker_proxies(config, worker["id"])
     text = (
         f"Рабочая панель\n"
         f"Воркер: {_worker_name(worker)}\n\n"
         f"НЕРЕГ: {nereg_count}\n"
-        f"РЕГ: {reg_count}"
+        f"РЕГ: {reg_count}\n"
+        f"Прокси: {proxy_remaining}/{proxy_total}"
     )
     await message.answer(
         text,
@@ -1785,18 +1799,31 @@ async def confirm_delete_worker(callback: CallbackQuery, config: Config) -> None
 
 
 @router.callback_query(F.data == "proxies:menu")
-async def show_proxies(callback: CallbackQuery, config: Config) -> None:
-    rows = list_proxies(config)
-    text = "Прокси"
+async def show_proxies(callback: CallbackQuery, state: FSMContext, config: Config) -> None:
+    await state.clear()
+    rows = list_available_proxies(config)
+    total = count_available_proxies(config)
+    text = f"Прокси\n\nСвободно: {total}"
     if rows:
-        text += "\n\n" + "\n".join(
-            f"#{row['id']} | воркер:{row['worker_id'] or '-'} | {row['proxy']}"
-            for row in rows
-        )
-        text += "\n\nОтправь /proxy_<id>, чтобы выдать прокси воркеру."
+        if total > len(rows):
+            text += f"\nПоказаны первые {len(rows)}."
     else:
         text += "\n\nПрокси пока нет."
-    await callback.message.edit_text(text, reply_markup=proxies_menu())
+    await callback.message.edit_text(text, reply_markup=proxies_storage_keyboard(rows))
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("proxy:open:"))
+async def open_proxy(callback: CallbackQuery, config: Config) -> None:
+    proxy_id = int(callback.data.rsplit(":", 1)[-1])
+    proxy = next((row for row in list_available_proxies(config, limit=100000) if row["id"] == proxy_id), None)
+    if not proxy:
+        await callback.answer("Прокси уже выдан или не найден.", show_alert=True)
+        return
+    await callback.message.edit_text(
+        f"Прокси #{proxy['id']}\n\n<code>{escape(proxy['proxy'])}</code>",
+        reply_markup=proxy_detail_keyboard(proxy_id),
+    )
     await callback.answer()
 
 
@@ -1813,42 +1840,147 @@ async def add_proxy_finish(message: Message, state: FSMContext, config: Config) 
     if not lines:
         await message.answer("Список прокси пустой.")
         return
+    invalid = [line for line in lines if len(line.split(":")) < 4]
+    if invalid:
+        await message.answer(
+            "Есть строки не в формате host:port:user:pass.\n\n"
+            f"Первая ошибка: <code>{escape(invalid[0])}</code>"
+        )
+        return
     now = utc_now_iso()
     ids = [add_proxy(config, line, now) for line in lines]
     await state.clear()
-    await message.answer(f"Добавлено прокси: {len(ids)}", reply_markup=proxies_menu())
+    await message.answer(
+        f"Добавлено прокси: {len(ids)}\nСвободно всего: {count_available_proxies(config)}",
+        reply_markup=proxies_storage_keyboard(list_available_proxies(config)),
+    )
 
 
-@router.message(F.text.regexp(r"^/proxy_\d+$"))
-async def assign_proxy_start(message: Message, state: FSMContext, config: Config) -> None:
-    proxy_id = int((message.text or "").rsplit("_", 1)[-1])
-    if not proxy_exists(config, proxy_id):
-        await message.answer("Прокси не найден.")
+@router.callback_query(F.data == "proxies:assign")
+async def assign_proxy_start(callback: CallbackQuery, state: FSMContext, config: Config) -> None:
+    available = count_available_proxies(config)
+    if not available:
+        await callback.answer("Свободных прокси нет.", show_alert=True)
         return
     workers = list_workers(config)
-    lines = [f"#{row['id']} | {row['name']}" for row in workers]
+    if not workers:
+        await callback.answer("Сначала добавь воркера.", show_alert=True)
+        return
     await state.set_state(AssignProxy.waiting_worker_id)
-    await state.update_data(proxy_id=proxy_id)
-    text = "Отправь ID воркера для этого прокси или 0, чтобы вернуть в общее хранилище прокси."
-    if lines:
-        text += "\n\nВоркеры:\n" + "\n".join(lines)
-    await message.answer(text)
+    await callback.message.edit_text(
+        f"Свободных прокси: {available}\n\nВыбери воркера, кому выдать прокси.",
+        reply_markup=proxy_worker_select_keyboard(workers),
+    )
+    await callback.answer()
 
 
-@router.message(AssignProxy.waiting_worker_id)
+@router.callback_query(AssignProxy.waiting_worker_id, F.data.startswith("proxies:assign_worker:"))
+async def assign_proxy_worker_selected(callback: CallbackQuery, state: FSMContext, config: Config) -> None:
+    worker_id = int(callback.data.rsplit(":", 1)[-1])
+    worker = get_worker(config, worker_id)
+    if not worker:
+        await callback.answer("Воркер не найден.", show_alert=True)
+        return
+    available = count_available_proxies(config)
+    if not available:
+        await state.clear()
+        await callback.answer("Свободных прокси нет.", show_alert=True)
+        await callback.message.edit_text("Свободных прокси нет.", reply_markup=proxies_menu())
+        return
+    await state.update_data(proxy_worker_id=worker_id)
+    await state.set_state(AssignProxy.waiting_amount)
+    await callback.message.edit_text(
+        f"Воркер: {_worker_name(worker)}\nСвободных прокси: {available}\n\nВыбери количество или отправь число.",
+        reply_markup=proxy_amount_keyboard(available),
+    )
+    await callback.answer()
+
+
+async def _assign_proxy_amount(
+    state: FSMContext,
+    config: Config,
+    amount: int,
+) -> tuple[str, bool]:
+    available = count_available_proxies(config)
+    if amount <= 0:
+        return "Количество должно быть больше нуля.", False
+    if amount > available:
+        return f"Свободно только {available}. Отправь число не больше {available}.", False
+    data = await state.get_data()
+    worker_id = int(data["proxy_worker_id"])
+    worker = get_worker(config, worker_id)
+    if not worker:
+        await state.clear()
+        return "Воркер не найден.", False
+    assigned = assign_available_proxies_to_worker(config, worker_id, amount)
+    await state.clear()
+    return (
+        f"Выдано прокси: {assigned}\n"
+        f"Воркер: {_worker_name(worker)}\n"
+        f"Свободно осталось: {count_available_proxies(config)}",
+        True,
+    )
+
+
+@router.callback_query(AssignProxy.waiting_amount, F.data.startswith("proxies:assign_amount:"))
+async def assign_proxy_amount_button(callback: CallbackQuery, state: FSMContext, config: Config) -> None:
+    amount = int(callback.data.rsplit(":", 1)[-1])
+    text, done = await _assign_proxy_amount(state, config, amount)
+    await callback.message.edit_text(
+        text,
+        reply_markup=proxies_storage_keyboard(list_available_proxies(config)) if done else None,
+    )
+    await callback.answer()
+
+
+@router.message(AssignProxy.waiting_amount)
 async def assign_proxy_finish(message: Message, state: FSMContext, config: Config) -> None:
     raw = (message.text or "").strip()
     if not raw.isdigit():
-        await message.answer("Отправь числовой ID воркера или 0.")
+        await message.answer("Отправь количество числом.")
         return
-    worker_id = int(raw)
-    if worker_id != 0 and not worker_exists(config, worker_id):
-        await message.answer("Воркер не найден.")
+    text, done = await _assign_proxy_amount(state, config, int(raw))
+    await message.answer(
+        text,
+        reply_markup=proxies_storage_keyboard(list_available_proxies(config)) if done else None,
+    )
+
+
+@router.callback_query(F.data == "worker:self_proxy:menu")
+async def show_worker_proxy_menu(callback: CallbackQuery, config: Config, current_worker) -> None:
+    remaining = count_worker_proxies(config, current_worker["id"], "assigned")
+    total = count_worker_proxies(config, current_worker["id"])
+    await callback.message.edit_text(
+        f"Прокси\n\nДоступно: {remaining}/{total}",
+        reply_markup=worker_proxy_menu(remaining=remaining, total=total),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "worker:self_proxy:get")
+async def worker_get_proxy(callback: CallbackQuery, config: Config, current_worker) -> None:
+    worker_id = current_worker["id"]
+    before_total = count_worker_proxies(config, worker_id)
+    proxy = pop_worker_proxy(config, worker_id)
+    if not proxy:
+        remaining = count_worker_proxies(config, worker_id, "assigned")
+        total = count_worker_proxies(config, worker_id)
+        await callback.message.edit_text(
+            f"Прокси\n\nДоступно: {remaining}/{total}",
+            reply_markup=worker_proxy_menu(remaining=remaining, total=total),
+        )
+        await callback.answer("Прокси для тебя нет.", show_alert=True)
         return
-    data = await state.get_data()
-    assign_proxy_to_worker(config, int(data["proxy_id"]), None if worker_id == 0 else worker_id)
-    await state.clear()
-    await message.answer("Выдача прокси обновлена.", reply_markup=proxies_menu())
+    remaining = count_worker_proxies(config, worker_id, "assigned")
+    total = before_total
+    await callback.message.answer(
+        f"Прокси:\n<code>{escape(proxy['proxy'])}</code>\n\nОсталось: {remaining}/{total}"
+    )
+    await callback.message.edit_text(
+        f"Прокси\n\nДоступно: {remaining}/{total}",
+        reply_markup=worker_proxy_menu(remaining=remaining, total=total),
+    )
+    await callback.answer("Прокси выдан.")
 
 
 @router.callback_query(F.data == "settings:menu")
