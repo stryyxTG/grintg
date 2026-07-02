@@ -18,6 +18,11 @@ class AddByZip(StatesGroup):
 
 class CreateWorker(StatesGroup):
     waiting_telegram_id = State()
+    waiting_name = State()
+
+
+class RenameWorker(StatesGroup):
+    waiting_name = State()
 
 
 class AddProxy(StatesGroup):

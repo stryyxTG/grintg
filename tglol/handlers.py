@@ -37,6 +37,7 @@ from tglol.db import (
     pop_worker_proxy,
     set_account_worker_and_stage,
     set_account_stage,
+    update_worker_name,
     worker_exists,
 )
 from tglol.desktop_profile import generated_account_json, random_desktop_runtime, utc_now_iso
@@ -70,6 +71,7 @@ from tglol.keyboards import (
     worker_proxy_menu,
     worker_account_sections_menu,
     worker_detail_menu,
+    worker_name_choice_menu,
     worker_self_account_detail_menu,
     worker_self_accounts_page_keyboard,
     worker_self_menu,
@@ -77,7 +79,7 @@ from tglol.keyboards import (
     workers_menu,
 )
 from tglol.paths import unique_path
-from tglol.states import AddByCode, AddBySession, AddByZip, AddProxy, AssignProxy, CreateWorker
+from tglol.states import AddByCode, AddBySession, AddByZip, AddProxy, AssignProxy, CreateWorker, RenameWorker
 from tglol.telegram_service import get_latest_telegram_code, send_code, sign_in_code, sign_in_password, user_fields
 
 router = Router()
@@ -166,6 +168,29 @@ def _worker_name(worker) -> str:
     if not worker:
         return "-"
     return worker["name"]
+
+
+async def _fetch_worker_telegram_name(bot: Bot, telegram_id: int) -> str | None:
+    try:
+        chat = await bot.get_chat(telegram_id)
+    except Exception:
+        return None
+    username = getattr(chat, "username", None)
+    if username:
+        return f"@{username}"
+    parts = [
+        getattr(chat, "first_name", None),
+        getattr(chat, "last_name", None),
+    ]
+    name = " ".join(str(part).strip() for part in parts if part).strip()
+    return name or None
+
+
+def _clean_worker_label(raw: str) -> str | None:
+    label = " ".join((raw or "").split())
+    if not label or label in {"-", "0"}:
+        return None
+    return label[:64]
 
 
 def _worker_scope(worker) -> tuple[int | None | str, int | None | str]:
@@ -1715,7 +1740,8 @@ async def confirm_account_stage(callback: CallbackQuery, config: Config) -> None
 
 
 @router.callback_query(F.data == "workers:menu")
-async def show_workers(callback: CallbackQuery, config: Config) -> None:
+async def show_workers(callback: CallbackQuery, state: FSMContext, config: Config) -> None:
+    await state.clear()
     workers = list_workers(config)
     text = "Воркеры"
     if not workers:
@@ -1732,24 +1758,67 @@ async def add_worker_start(callback: CallbackQuery, state: FSMContext) -> None:
 
 
 @router.message(CreateWorker.waiting_telegram_id)
-async def add_worker_finish(message: Message, state: FSMContext, config: Config) -> None:
+async def add_worker_read_id(message: Message, bot: Bot, state: FSMContext) -> None:
     raw = (message.text or "").strip()
     if not raw.isdigit():
         await message.answer("Telegram ID должен быть числом.")
         return
     telegram_id = int(raw)
+    suggested_name = await _fetch_worker_telegram_name(bot, telegram_id)
+    await state.update_data(worker_telegram_id=telegram_id, worker_suggested_name=suggested_name)
+    await state.set_state(CreateWorker.waiting_name)
+    text = (
+        f"Telegram ID: <code>{telegram_id}</code>\n\n"
+        "Отправь подпись для кнопок воркера."
+    )
+    if suggested_name:
+        text += f"\n\nTelegram имя: <b>{escape(suggested_name)}</b>\nМожно нажать кнопку ниже."
+    else:
+        text += "\n\nИмя из Telegram подтянуть не удалось. Если воркер еще не писал /start боту, пусть напишет, или задай подпись вручную."
+    await message.answer(text, reply_markup=worker_name_choice_menu())
+
+
+async def _create_worker_with_name(
+    event_message: Message,
+    state: FSMContext,
+    config: Config,
+    name: str,
+) -> None:
+    data = await state.get_data()
+    telegram_id = int(data["worker_telegram_id"])
     worker_id = add_worker(
         config,
-        name=f"Воркер {telegram_id}",
+        name=name,
         telegram_id=telegram_id,
         department_id=None,
         created_at=utc_now_iso(),
     )
     await state.clear()
-    await message.answer(
-        f"Воркер создан\nID воркера: {worker_id}\nTelegram ID: {telegram_id}\n\nДоступ выдан к его хранилищу.",
+    await event_message.answer(
+        f"Воркер создан\nИмя: {name}\nTelegram ID: {telegram_id}\n\nДоступ выдан к его хранилищу.",
         reply_markup=workers_menu(list_workers(config)),
     )
+
+
+@router.message(CreateWorker.waiting_name)
+async def add_worker_finish_manual(message: Message, state: FSMContext, config: Config) -> None:
+    data = await state.get_data()
+    name = _clean_worker_label(message.text or "") or data.get("worker_suggested_name")
+    if not name:
+        await message.answer("Отправь подпись текстом. Например: @username или Вася.")
+        return
+    await _create_worker_with_name(message, state, config, str(name))
+
+
+@router.callback_query(CreateWorker.waiting_name, F.data == "worker:add:name:auto")
+async def add_worker_finish_auto(callback: CallbackQuery, state: FSMContext, config: Config) -> None:
+    data = await state.get_data()
+    name = data.get("worker_suggested_name")
+    if not name:
+        await callback.answer("Имя из Telegram не найдено, отправь подпись текстом.", show_alert=True)
+        return
+    await _create_worker_with_name(callback.message, state, config, str(name))
+    await callback.answer()
 
 
 @router.callback_query(F.data.startswith("worker:open:"))
@@ -1770,6 +1839,42 @@ async def open_worker(callback: CallbackQuery, config: Config) -> None:
     )
     await callback.message.edit_text(text, reply_markup=worker_detail_menu(worker_id))
     await callback.answer()
+
+
+@router.callback_query(F.data.startswith("worker:rename:"))
+async def rename_worker_start(callback: CallbackQuery, state: FSMContext, config: Config) -> None:
+    worker_id = int(callback.data.rsplit(":", 1)[-1])
+    worker = get_worker(config, worker_id)
+    if not worker:
+        await callback.answer("Воркер не найден.", show_alert=True)
+        return
+    await state.set_state(RenameWorker.waiting_name)
+    await state.update_data(rename_worker_id=worker_id)
+    await callback.message.edit_text(
+        f"Текущее имя: <b>{escape(worker['name'])}</b>\n\nОтправь новую подпись для кнопок."
+    )
+    await callback.answer()
+
+
+@router.message(RenameWorker.waiting_name)
+async def rename_worker_finish(message: Message, state: FSMContext, config: Config) -> None:
+    name = _clean_worker_label(message.text or "")
+    if not name:
+        await message.answer("Подпись пустая. Отправь текстом новое имя.")
+        return
+    data = await state.get_data()
+    worker_id = int(data["rename_worker_id"])
+    worker = get_worker(config, worker_id)
+    if not worker:
+        await state.clear()
+        await message.answer("Воркер не найден.", reply_markup=workers_menu(list_workers(config)))
+        return
+    update_worker_name(config, worker_id, name)
+    await state.clear()
+    await message.answer(
+        f"Воркер переименован: <b>{escape(name)}</b>",
+        reply_markup=workers_menu(list_workers(config)),
+    )
 
 
 @router.callback_query(F.data.startswith("worker:delete:ask:"))

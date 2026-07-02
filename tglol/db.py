@@ -290,6 +290,14 @@ def add_worker(
         return int(cursor.lastrowid)
 
 
+def update_worker_name(config: Config, worker_id: int, name: str) -> None:
+    with connect(config) as connection:
+        connection.execute(
+            "UPDATE workers SET name = ? WHERE id = ?",
+            (name, worker_id),
+        )
+
+
 def list_workers(config: Config) -> list[sqlite3.Row]:
     with connect(config) as connection:
         return connection.execute("SELECT * FROM workers ORDER BY id DESC").fetchall()

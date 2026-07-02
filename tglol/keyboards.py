@@ -278,8 +278,17 @@ def workers_menu(workers: Sequence) -> InlineKeyboardMarkup:
 def worker_detail_menu(worker_id: int) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     builder.button(text="Аккаунты воркера", callback_data=f"worker:account_sections:{worker_id}")
+    builder.button(text="Переименовать", callback_data=f"worker:rename:{worker_id}")
     builder.button(text="Удалить воркера", callback_data=f"worker:delete:ask:{worker_id}")
     builder.button(text="Назад", callback_data="workers:menu")
+    builder.adjust(1)
+    return builder.as_markup()
+
+
+def worker_name_choice_menu() -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    builder.button(text="Взять имя из Telegram", callback_data="worker:add:name:auto")
+    builder.button(text="Отмена", callback_data="workers:menu")
     builder.adjust(1)
     return builder.as_markup()
 
