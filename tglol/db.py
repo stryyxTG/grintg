@@ -375,6 +375,10 @@ def assign_available_proxies_to_worker(config: Config, worker_id: int, amount: i
     if amount <= 0:
         return 0
     with connect(config) as connection:
+        connection.execute(
+            "UPDATE proxies SET worker_id = NULL WHERE worker_id = ? AND status = 'used'",
+            (worker_id,),
+        )
         rows = connection.execute(
             "SELECT id FROM proxies WHERE worker_id IS NULL AND status = 'stored' ORDER BY id ASC LIMIT ?",
             (amount,),
