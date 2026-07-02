@@ -37,6 +37,19 @@ def add_account_menu() -> InlineKeyboardMarkup:
     builder.button(text=".session", callback_data="accounts:add:session")
     builder.button(text=".session + .json", callback_data="accounts:add:session_json")
     builder.button(text="Массово .zip", callback_data="accounts:add:zip")
+    builder.button(text="Назад", callback_data="accounts:add")
+    builder.adjust(1)
+    return builder.as_markup()
+
+
+def add_account_target_menu(workers: Sequence) -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    builder.button(text="Основное хранилище", callback_data="accounts:add_target:common")
+    for worker in workers:
+        builder.button(
+            text=worker["name"],
+            callback_data=f"accounts:add_target:worker:{worker['id']}",
+        )
     builder.button(text="Назад", callback_data="accounts:menu")
     builder.adjust(1)
     return builder.as_markup()

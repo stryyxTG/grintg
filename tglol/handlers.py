@@ -44,6 +44,7 @@ from tglol.keyboards import (
     accounts_menu,
     accounts_page_keyboard,
     add_account_menu,
+    add_account_target_menu,
     assign_account_keyboard,
     confirm_account_stage_menu,
     confirm_worker_account_stage_menu,
@@ -403,6 +404,32 @@ def _account_connection_params(account, config: Config) -> tuple[int, str, dict[
     return api_id, api_hash, runtime
 
 
+def _add_target_worker_id(data: dict) -> int | None:
+    value = data.get("add_target_worker_id")
+    if value in (None, "", 0, "0"):
+        return None
+    return int(value)
+
+
+def _add_target_label(config: Config, worker_id: int | None) -> str:
+    if worker_id is None:
+        return "Основное хранилище"
+    worker = get_worker(config, worker_id)
+    return worker["name"] if worker else "Воркер не найден"
+
+
+def _apply_added_account_destination(config: Config, account_id: int, worker_id: int | None) -> None:
+    set_account_stage(config, account_id, "nereg")
+    if worker_id is not None:
+        assign_account_to_worker(config, account_id, worker_id)
+
+
+def _apply_import_results_destination(config: Config, results, worker_id: int | None) -> None:
+    for result in results:
+        if result.account_id:
+            _apply_added_account_destination(config, result.account_id, worker_id)
+
+
 async def finalize_code_login(
     message: Message,
     state: FSMContext,
@@ -457,10 +484,18 @@ async def finalize_code_login(
             "updated_at": now,
         },
     )
+    target_worker_id = _add_target_worker_id(data)
+    _apply_added_account_destination(config, account_id, target_worker_id)
     await state.clear()
     await message.answer(
-        f"Аккаунт добавлен по коду.\nID: {account_id}\nТелефон: {fields['phone'] or '-'}",
-        reply_markup=add_account_menu(),
+        (
+            f"Аккаунт добавлен по коду.\n"
+            f"ID: {account_id}\n"
+            f"Телефон: {fields['phone'] or '-'}\n"
+            f"Хранилище: {_add_target_label(config, target_worker_id)}\n"
+            f"Раздел: НЕРЕГ"
+        ),
+        reply_markup=add_account_target_menu(list_workers(config)),
     )
 
 
@@ -499,9 +534,29 @@ async def show_accounts_menu(callback: CallbackQuery, state: FSMContext) -> None
 
 
 @router.callback_query(F.data == "accounts:add")
-async def show_add_account_menu(callback: CallbackQuery, state: FSMContext) -> None:
+async def show_add_account_target_menu(callback: CallbackQuery, state: FSMContext, config: Config) -> None:
     await state.clear()
-    await callback.message.edit_text("Выбери способ добавления аккаунта", reply_markup=add_account_menu())
+    await callback.message.edit_text(
+        "Куда добавить аккаунт?\n\nВсе новые аккаунты попадут в раздел НЕРЕГ.",
+        reply_markup=add_account_target_menu(list_workers(config)),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("accounts:add_target:"))
+async def select_add_account_target(callback: CallbackQuery, state: FSMContext, config: Config) -> None:
+    parts = callback.data.split(":")
+    worker_id = None
+    if len(parts) == 4 and parts[2] == "worker":
+        worker_id = int(parts[3])
+        if not worker_exists(config, worker_id):
+            await callback.answer("Воркер не найден.", show_alert=True)
+            return
+    await state.update_data(add_target_worker_id=worker_id)
+    await callback.message.edit_text(
+        f"Хранилище: {_add_target_label(config, worker_id)}\nРаздел: НЕРЕГ\n\nВыбери способ добавления аккаунта.",
+        reply_markup=add_account_menu(),
+    )
     await callback.answer()
 
 
@@ -535,8 +590,11 @@ async def add_by_code_phone(message: Message, state: FSMContext, config: Config)
             runtime,
         )
     except Exception as exc:
-        await message.answer(f"Не удалось отправить код Telegram: {exc}", reply_markup=add_account_menu())
         await state.clear()
+        await message.answer(
+            f"Не удалось отправить код Telegram: {exc}",
+            reply_markup=add_account_target_menu(list_workers(config)),
+        )
         return
 
     await state.update_data(
@@ -553,8 +611,11 @@ async def add_by_code_phone(message: Message, state: FSMContext, config: Config)
         await finalize_code_login(message, state, config, twofa=None, user=code_request.user)
         return
     if code_request.already_authorized:
-        await message.answer("Сессия уже авторизована, но Telegram не вернул данные аккаунта.", reply_markup=add_account_menu())
         await state.clear()
+        await message.answer(
+            "Сессия уже авторизована, но Telegram не вернул данные аккаунта.",
+            reply_markup=add_account_target_menu(list_workers(config)),
+        )
         return
 
     info_text = _code_request_text(code_request)
@@ -707,10 +768,19 @@ async def add_session_file(message: Message, bot: Bot, state: FSMContext, config
         source_type="session",
         created_by=message.from_user.id if message.from_user else None,
     )
+    target_worker_id = _add_target_worker_id(data)
+    _apply_added_account_destination(config, result.account_id, target_worker_id)
     await state.clear()
     await message.answer(
-        f"Session импортирован.\nID: {result.account_id}\nСтатус: {result.status}\nТелефон: {result.phone or '-'}",
-        reply_markup=add_account_menu(),
+        (
+            f"Session импортирован.\n"
+            f"ID: {result.account_id}\n"
+            f"Статус: {result.status}\n"
+            f"Телефон: {result.phone or '-'}\n"
+            f"Хранилище: {_add_target_label(config, target_worker_id)}\n"
+            f"Раздел: НЕРЕГ"
+        ),
+        reply_markup=add_account_target_menu(list_workers(config)),
     )
 
 
@@ -723,10 +793,19 @@ async def session_import_without_json(callback: CallbackQuery, state: FSMContext
         source_type="session",
         created_by=callback.from_user.id,
     )
+    target_worker_id = _add_target_worker_id(data)
+    _apply_added_account_destination(config, result.account_id, target_worker_id)
     await state.clear()
     await callback.message.edit_text(
-        f"Session импортирован без JSON.\nID: {result.account_id}\nСтатус: {result.status}\nТелефон: {result.phone or '-'}",
-        reply_markup=add_account_menu(),
+        (
+            f"Session импортирован без JSON.\n"
+            f"ID: {result.account_id}\n"
+            f"Статус: {result.status}\n"
+            f"Телефон: {result.phone or '-'}\n"
+            f"Хранилище: {_add_target_label(config, target_worker_id)}\n"
+            f"Раздел: НЕРЕГ"
+        ),
+        reply_markup=add_account_target_menu(list_workers(config)),
     )
     await callback.answer()
 
@@ -750,14 +829,26 @@ async def add_json_file(message: Message, bot: Bot, state: FSMContext, config: C
             created_by=message.from_user.id if message.from_user else None,
         )
     except Exception as exc:
-        await message.answer(f"Импорт не удался: {exc}", reply_markup=add_account_menu())
         await state.clear()
+        await message.answer(
+            f"Импорт не удался: {exc}",
+            reply_markup=add_account_target_menu(list_workers(config)),
+        )
         return
 
     await state.clear()
+    target_worker_id = _add_target_worker_id(data)
+    _apply_added_account_destination(config, result.account_id, target_worker_id)
     await message.answer(
-        f"Session + JSON импортированы.\nID: {result.account_id}\nСтатус: {result.status}\nТелефон: {result.phone or '-'}",
-        reply_markup=add_account_menu(),
+        (
+            f"Session + JSON импортированы.\n"
+            f"ID: {result.account_id}\n"
+            f"Статус: {result.status}\n"
+            f"Телефон: {result.phone or '-'}\n"
+            f"Хранилище: {_add_target_label(config, target_worker_id)}\n"
+            f"Раздел: НЕРЕГ"
+        ),
+        reply_markup=add_account_target_menu(list_workers(config)),
     )
 
 
@@ -784,11 +875,20 @@ async def add_zip_file(message: Message, bot: Bot, state: FSMContext, config: Co
             created_by=message.from_user.id if message.from_user else None,
         )
     except Exception as exc:
-        await message.answer(f"Импорт ZIP не удался: {exc}", reply_markup=add_account_menu())
         await state.clear()
+        await message.answer(
+            f"Импорт ZIP не удался: {exc}",
+            reply_markup=add_account_target_menu(list_workers(config)),
+        )
         return
 
+    data = await state.get_data()
+    target_worker_id = _add_target_worker_id(data)
+    _apply_import_results_destination(config, results, target_worker_id)
     lines = [summary, ""]
+    lines.append(f"Хранилище: {_add_target_label(config, target_worker_id)}")
+    lines.append("Раздел: НЕРЕГ")
+    lines.append("")
     for result in results[:20]:
         if result.account_id:
             lines.append(f"#{result.account_id} | {result.status} | {result.phone or result.username or '-'}")
@@ -797,7 +897,7 @@ async def add_zip_file(message: Message, bot: Bot, state: FSMContext, config: Co
     if len(results) > 20:
         lines.append(f"...и еще {len(results) - 20}")
     await state.clear()
-    await message.answer("\n".join(lines), reply_markup=add_account_menu())
+    await message.answer("\n".join(lines), reply_markup=add_account_target_menu(list_workers(config)))
 
 
 @router.message(F.text == "/cancel")
