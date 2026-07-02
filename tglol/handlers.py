@@ -583,7 +583,7 @@ async def finalize_code_login(
             f"Хранилище: {_add_target_label(config, target_worker_id)}\n"
             f"Раздел: НЕРЕГ"
         ),
-        reply_markup=add_account_target_menu(list_workers(config)),
+        reply_markup=accounts_menu(),
     )
 
 
@@ -883,7 +883,7 @@ async def add_session_file(message: Message, bot: Bot, state: FSMContext, config
             f"Хранилище: {_add_target_label(config, target_worker_id)}\n"
             f"Раздел: НЕРЕГ"
         ),
-        reply_markup=add_account_target_menu(list_workers(config)),
+        reply_markup=accounts_menu(),
     )
 
 
@@ -908,7 +908,7 @@ async def session_import_without_json(callback: CallbackQuery, state: FSMContext
             f"Хранилище: {_add_target_label(config, target_worker_id)}\n"
             f"Раздел: НЕРЕГ"
         ),
-        reply_markup=add_account_target_menu(list_workers(config)),
+        reply_markup=accounts_menu(),
     )
     await callback.answer()
 
@@ -951,7 +951,7 @@ async def add_json_file(message: Message, bot: Bot, state: FSMContext, config: C
             f"Хранилище: {_add_target_label(config, target_worker_id)}\n"
             f"Раздел: НЕРЕГ"
         ),
-        reply_markup=add_account_target_menu(list_workers(config)),
+        reply_markup=accounts_menu(),
     )
 
 
@@ -1000,7 +1000,7 @@ async def add_zip_file(message: Message, bot: Bot, state: FSMContext, config: Co
     if len(results) > 20:
         lines.append(f"...и еще {len(results) - 20}")
     await state.clear()
-    await message.answer("\n".join(lines), reply_markup=add_account_target_menu(list_workers(config)))
+    await message.answer("\n".join(lines), reply_markup=accounts_menu())
 
 
 @router.message(F.text == "/cancel")
