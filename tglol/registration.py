@@ -36,6 +36,11 @@ def services_label(raw: str | None, legacy_service: str | None = None) -> str:
     return ", ".join(service_label(service) for service in services) if services else "без сервиса"
 
 
+def services_short_label(raw: str | None, legacy_service: str | None = None) -> str:
+    services = services_from_storage(raw, legacy_service)
+    return ",".join(services) if services else "none"
+
+
 def service_filter_label(
     registration_service: str | None = None,
     excluded_service: str | None = None,

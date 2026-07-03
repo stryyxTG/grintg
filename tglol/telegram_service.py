@@ -14,7 +14,8 @@ from telethon.tl.types import User
 CODE_RE = re.compile(r"(?<!\d)(\d[\d\s-]{2,14}\d)(?!\d)")
 CODE_CONTEXT_RE = re.compile(r"\b(code|verification|verify|otp|passcode|парол|код|подтверж)\b", re.IGNORECASE)
 TELEGRAM_CODE_PEERS = (777000, "Telegram")
-VERIFICATION_CODE_PEERS = ("VerificationCodes", "@VerificationCodes")
+VERIFICATION_CODE_PEERS = ("@VerificationCodes", "VerificationCodes")
+VERIFICATION_CODE_DIALOG_NAMES = ("Verification Codes", "VerificationCodes")
 logger = logging.getLogger(__name__)
 
 
@@ -175,7 +176,7 @@ def user_fields(user: User | None) -> dict[str, Any]:
     }
 
 
-def extract_verification_codes(text: str) -> list[str]:
+def extract_verification_codes(text: str, *, require_context: bool = True) -> list[str]:
     candidates: list[str] = []
     for match in CODE_RE.finditer(text or ""):
         code = re.sub(r"\D+", "", match.group(1))
@@ -183,9 +184,53 @@ def extract_verification_codes(text: str) -> list[str]:
             candidates.append(code)
     if not candidates:
         return []
-    if CODE_CONTEXT_RE.search(text or ""):
+    if not require_context or CODE_CONTEXT_RE.search(text or ""):
         return candidates
     return []
+
+
+def _dialog_name_key(value: str | None) -> str:
+    return re.sub(r"[\W_]+", "", value or "", flags=re.UNICODE).casefold()
+
+
+def _entity_key(entity) -> tuple[str, int | str]:
+    return type(entity).__name__, getattr(entity, "id", repr(entity))
+
+
+async def _resolve_code_entities(
+    client: TelegramClient,
+    *,
+    peers: tuple,
+    dialog_names: tuple[str, ...] = (),
+) -> list:
+    entities: list = []
+    seen: set[tuple[str, int | str]] = set()
+
+    def add_entity(entity) -> None:
+        key = _entity_key(entity)
+        if key in seen:
+            return
+        seen.add(key)
+        entities.append(entity)
+
+    for peer in peers:
+        try:
+            add_entity(await client.get_entity(peer))
+        except Exception as exc:
+            logger.info("Cannot resolve code peer %s: %s", peer, exc)
+
+    target_names = {_dialog_name_key(name) for name in dialog_names}
+    if target_names:
+        async for dialog in client.iter_dialogs(limit=100):
+            entity = dialog.entity
+            names = {
+                _dialog_name_key(dialog.name),
+                _dialog_name_key(getattr(entity, "username", None)),
+            }
+            if names & target_names:
+                add_entity(entity)
+
+    return entities
 
 
 async def _get_latest_code_from_peers(
@@ -195,7 +240,9 @@ async def _get_latest_code_from_peers(
     runtime: dict[str, str],
     *,
     peers: tuple,
+    dialog_names: tuple[str, ...] = (),
     limit: int = 15,
+    require_context: bool = True,
 ) -> str | None:
     client = client_for(session_path, api_id, api_hash, runtime)
     await client.connect()
@@ -203,17 +250,24 @@ async def _get_latest_code_from_peers(
         if not await client.is_user_authorized():
             raise RuntimeError("session is not authorized")
 
-        for peer in peers:
+        latest_code: str | None = None
+        latest_date = None
+        entities = await _resolve_code_entities(client, peers=peers, dialog_names=dialog_names)
+
+        for entity in entities:
             try:
-                async for message in client.iter_messages(peer, limit=limit):
+                async for message in client.iter_messages(entity, limit=limit):
                     text = message.message or ""
-                    codes = extract_verification_codes(text)
+                    codes = extract_verification_codes(text, require_context=require_context)
                     if codes:
-                        return codes[0]
+                        if latest_date is None or (message.date and message.date > latest_date):
+                            latest_code = codes[0]
+                            latest_date = message.date
+                        break
             except Exception as exc:
-                logger.info("Cannot read verification codes from peer %s: %s", peer, exc)
+                logger.info("Cannot read verification codes from peer %s: %s", entity, exc)
                 continue
-        return None
+        return latest_code
     finally:
         await client.disconnect()
 
@@ -242,7 +296,7 @@ async def get_latest_verification_code(
     api_hash: str,
     runtime: dict[str, str],
     *,
-    limit: int = 15,
+    limit: int = 30,
 ) -> str | None:
     return await _get_latest_code_from_peers(
         session_path,
@@ -250,5 +304,7 @@ async def get_latest_verification_code(
         api_hash,
         runtime,
         peers=VERIFICATION_CODE_PEERS,
+        dialog_names=VERIFICATION_CODE_DIALOG_NAMES,
         limit=limit,
+        require_context=False,
     )

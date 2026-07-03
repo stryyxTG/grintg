@@ -14,6 +14,7 @@ from tglol.registration import (
     service_filter_value,
     service_label,
     services_label,
+    services_short_label,
 )
 
 
@@ -51,12 +52,12 @@ def digit_code_keyboard() -> InlineKeyboardMarkup:
 
 
 def _account_label(account) -> str:
-    name = account.phone or account.username or account.telegram_user_id or "без данных"
+    name = account.phone or account.username or str(account.telegram_user_id or "без данных")
     if account.account_stage == "reg":
-        stage = f"РЕГ {services_label(account.registration_services, account.registration_service)}"
+        stage = services_short_label(account.registration_services, account.registration_service)
     else:
-        stage = "НЕРЕГ"
-    return f"#{account.id} | {name} | {stage} | {account.status}"
+        stage = "nereg"
+    return f"{name} | {stage}"
 
 
 def _origin_stage(origin: str) -> str | None:
