@@ -13,6 +13,7 @@ from telethon.tl.types import User
 
 CODE_RE = re.compile(r"(?<!\d)(\d[\d\s-]{2,14}\d)(?!\d)")
 CODE_CONTEXT_RE = re.compile(r"\b(code|verification|verify|otp|passcode|парол|код|подтверж)\b", re.IGNORECASE)
+TELEGRAM_CODE_PEERS = (777000, "Telegram")
 VERIFICATION_CODE_PEERS = ("VerificationCodes", "@VerificationCodes")
 logger = logging.getLogger(__name__)
 
@@ -187,12 +188,13 @@ def extract_verification_codes(text: str) -> list[str]:
     return []
 
 
-async def get_latest_telegram_code(
+async def _get_latest_code_from_peers(
     session_path: Path,
     api_id: int,
     api_hash: str,
     runtime: dict[str, str],
     *,
+    peers: tuple,
     limit: int = 15,
 ) -> str | None:
     client = client_for(session_path, api_id, api_hash, runtime)
@@ -201,7 +203,7 @@ async def get_latest_telegram_code(
         if not await client.is_user_authorized():
             raise RuntimeError("session is not authorized")
 
-        for peer in VERIFICATION_CODE_PEERS:
+        for peer in peers:
             try:
                 async for message in client.iter_messages(peer, limit=limit):
                     text = message.message or ""
@@ -214,3 +216,39 @@ async def get_latest_telegram_code(
         return None
     finally:
         await client.disconnect()
+
+
+async def get_latest_telegram_code(
+    session_path: Path,
+    api_id: int,
+    api_hash: str,
+    runtime: dict[str, str],
+    *,
+    limit: int = 15,
+) -> str | None:
+    return await _get_latest_code_from_peers(
+        session_path,
+        api_id,
+        api_hash,
+        runtime,
+        peers=TELEGRAM_CODE_PEERS,
+        limit=limit,
+    )
+
+
+async def get_latest_verification_code(
+    session_path: Path,
+    api_id: int,
+    api_hash: str,
+    runtime: dict[str, str],
+    *,
+    limit: int = 15,
+) -> str | None:
+    return await _get_latest_code_from_peers(
+        session_path,
+        api_id,
+        api_hash,
+        runtime,
+        peers=VERIFICATION_CODE_PEERS,
+        limit=limit,
+    )

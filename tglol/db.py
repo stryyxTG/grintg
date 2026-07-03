@@ -1,10 +1,11 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 import sqlite3
 from typing import Any
 
 from tglol.config import Config
+from tglol.registration import services_to_storage
 
 
 SCHEMA = """
@@ -21,29 +22,13 @@ CREATE TABLE IF NOT EXISTS accounts (
     json_source TEXT NOT NULL,
     twofa_password TEXT,
     source_type TEXT NOT NULL,
-    worker_id INTEGER,
-    department_id INTEGER,
     account_stage TEXT NOT NULL DEFAULT 'nereg',
+    registration_service TEXT,
+    registration_services TEXT,
     status TEXT NOT NULL,
     created_by INTEGER,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS workers (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    telegram_id INTEGER,
-    name TEXT NOT NULL,
-    department_id INTEGER,
-    created_at TEXT NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS proxies (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    proxy TEXT NOT NULL,
-    worker_id INTEGER,
-    status TEXT NOT NULL DEFAULT 'stored',
-    created_at TEXT NOT NULL
 );
 """
 
@@ -62,9 +47,9 @@ class Account:
     json_source: str
     twofa_password: str | None
     source_type: str
-    worker_id: int | None
-    department_id: int | None
     account_stage: str
+    registration_service: str | None
+    registration_services: str | None
     status: str
     created_by: int | None
     created_at: str
@@ -80,20 +65,33 @@ def connect(config: Config) -> sqlite3.Connection:
 def init_db(config: Config) -> None:
     with connect(config) as connection:
         connection.executescript(SCHEMA)
-        _ensure_column(connection, "accounts", "worker_id", "INTEGER")
-        _ensure_column(connection, "accounts", "department_id", "INTEGER")
         _ensure_column(connection, "accounts", "account_stage", "TEXT NOT NULL DEFAULT 'nereg'")
-        connection.execute("UPDATE workers SET department_id = NULL")
-        connection.execute("UPDATE accounts SET department_id = NULL")
+        _ensure_column(connection, "accounts", "registration_service", "TEXT")
+        _ensure_column(connection, "accounts", "registration_services", "TEXT")
+        connection.execute(
+            """
+            UPDATE accounts
+            SET registration_services = registration_service
+            WHERE registration_services IS NULL
+              AND registration_service IS NOT NULL
+              AND registration_service != ''
+            """
+        )
+
+
+def _table_columns(connection: sqlite3.Connection, table: str) -> set[str]:
+    return {row["name"] for row in connection.execute(f"PRAGMA table_info({table})").fetchall()}
 
 
 def _ensure_column(connection: sqlite3.Connection, table: str, column: str, definition: str) -> None:
-    columns = {
-        row["name"]
-        for row in connection.execute(f"PRAGMA table_info({table})").fetchall()
-    }
-    if column not in columns:
+    if column not in _table_columns(connection, table):
         connection.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+
+
+def _account_from_row(row: sqlite3.Row) -> Account:
+    values = dict(row)
+    names = {field.name for field in fields(Account)}
+    return Account(**{name: values.get(name) for name in names})
 
 
 def add_account(config: Config, values: dict[str, Any]) -> int:
@@ -111,25 +109,21 @@ def list_accounts(
     config: Config,
     limit: int = 20,
     offset: int = 0,
-    worker_id: int | None | str = "any",
     account_stage: str | None = None,
-    department_id: int | None | str = "any",
+    registration_service: str | None = None,
+    excluded_registration_service: str | None = None,
 ) -> list[Account]:
     clauses: list[str] = []
     params: list[Any] = []
-    if worker_id is None:
-        clauses.append("worker_id IS NULL")
-    elif worker_id != "any":
-        clauses.append("worker_id = ?")
-        params.append(worker_id)
     if account_stage is not None:
         clauses.append("account_stage = ?")
         params.append(account_stage)
-    if department_id is None:
-        clauses.append("department_id IS NULL")
-    elif department_id != "any":
-        clauses.append("department_id = ?")
-        params.append(department_id)
+    if registration_service is not None:
+        clauses.append("instr(',' || coalesce(nullif(registration_services, ''), registration_service, '') || ',', ?) > 0")
+        params.append(f",{registration_service},")
+    if excluded_registration_service is not None:
+        clauses.append("instr(',' || coalesce(nullif(registration_services, ''), registration_service, '') || ',', ?) = 0")
+        params.append(f",{excluded_registration_service},")
     where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
 
     with connect(config) as connection:
@@ -137,23 +131,23 @@ def list_accounts(
             f"SELECT * FROM accounts {where} ORDER BY id DESC LIMIT ? OFFSET ?",
             (*params, limit, offset),
         ).fetchall()
-    return [Account(**dict(row)) for row in rows]
+    return [_account_from_row(row) for row in rows]
 
 
 def list_accounts_by_scope(
     config: Config,
     *,
-    worker_id: int | None | str = "any",
     account_stage: str | None = None,
-    department_id: int | None | str = "any",
+    registration_service: str | None = None,
+    excluded_registration_service: str | None = None,
 ) -> list[Account]:
     return list_accounts(
         config,
         limit=100000,
         offset=0,
-        worker_id=worker_id,
         account_stage=account_stage,
-        department_id=department_id,
+        registration_service=registration_service,
+        excluded_registration_service=excluded_registration_service,
     )
 
 
@@ -163,124 +157,75 @@ def get_account(config: Config, account_id: int) -> Account | None:
             "SELECT * FROM accounts WHERE id = ?",
             (account_id,),
         ).fetchone()
-    return Account(**dict(row)) if row else None
+    return _account_from_row(row) if row else None
 
 
-def count_accounts(config: Config, worker_id: int | None | str = "any") -> int:
-    return count_accounts_by_stage(config, worker_id=worker_id)
+def count_accounts(config: Config) -> int:
+    return count_accounts_by_stage(config)
 
 
 def count_accounts_by_stage(
     config: Config,
-    worker_id: int | None | str = "any",
     account_stage: str | None = None,
-    department_id: int | None | str = "any",
+    registration_service: str | None = None,
+    excluded_registration_service: str | None = None,
 ) -> int:
     clauses: list[str] = []
     params: list[Any] = []
-    if worker_id is None:
-        clauses.append("worker_id IS NULL")
-    elif worker_id != "any":
-        clauses.append("worker_id = ?")
-        params.append(worker_id)
     if account_stage is not None:
         clauses.append("account_stage = ?")
         params.append(account_stage)
-    if department_id is None:
-        clauses.append("department_id IS NULL")
-    elif department_id != "any":
-        clauses.append("department_id = ?")
-        params.append(department_id)
+    if registration_service is not None:
+        clauses.append("instr(',' || coalesce(nullif(registration_services, ''), registration_service, '') || ',', ?) > 0")
+        params.append(f",{registration_service},")
+    if excluded_registration_service is not None:
+        clauses.append("instr(',' || coalesce(nullif(registration_services, ''), registration_service, '') || ',', ?) = 0")
+        params.append(f",{excluded_registration_service},")
     where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
 
     with connect(config) as connection:
         return int(connection.execute(f"SELECT COUNT(*) FROM accounts {where}", params).fetchone()[0])
 
 
-def set_account_stage(config: Config, account_id: int, account_stage: str) -> None:
-    if account_stage not in {"nereg", "reg"}:
-        raise ValueError("unknown account stage")
-    with connect(config) as connection:
-        connection.execute(
-            "UPDATE accounts SET account_stage = ?, updated_at = datetime('now') WHERE id = ?",
-            (account_stage, account_id),
-        )
-
-
-def set_account_worker_and_stage(
+def set_account_stage(
     config: Config,
     account_id: int,
-    worker_id: int | None,
     account_stage: str,
+    registration_service: str | None = None,
+    registration_services=None,
 ) -> None:
     if account_stage not in {"nereg", "reg"}:
         raise ValueError("unknown account stage")
+    if account_stage == "reg":
+        if registration_services is None and registration_service is not None:
+            registration_services = (registration_service,)
+        stored_services = services_to_storage(registration_services)
+        if not stored_services:
+            raise ValueError("unknown registration service")
+        first_service = stored_services.split(",", 1)[0]
+    else:
+        stored_services = None
+        first_service = None
     with connect(config) as connection:
         connection.execute(
             """
             UPDATE accounts
-            SET worker_id = ?, department_id = NULL, account_stage = ?, updated_at = datetime('now')
+            SET account_stage = ?,
+                registration_service = ?,
+                registration_services = ?,
+                updated_at = datetime('now')
             WHERE id = ?
             """,
-            (worker_id, account_stage, account_id),
+            (account_stage, first_service, stored_services, account_id),
         )
 
 
-def move_accounts_to_common_by_scope(
-    config: Config,
-    *,
-    worker_id: int,
-    source_stage: str,
-    target_stage: str,
-) -> int:
-    if source_stage not in {"nereg", "reg"} or target_stage not in {"nereg", "reg"}:
-        raise ValueError("unknown account stage")
+def update_account_status(config: Config, account_id: int, status: str) -> None:
     with connect(config) as connection:
-        cursor = connection.execute(
-            """
-            UPDATE accounts
-            SET worker_id = NULL, department_id = NULL, account_stage = ?, updated_at = datetime('now')
-            WHERE worker_id = ? AND account_stage = ?
-            """,
-            (target_stage, worker_id, source_stage),
+        connection.execute(
+            "UPDATE accounts SET status = ?, updated_at = datetime('now') WHERE id = ?",
+            (status, account_id),
         )
-        return int(cursor.rowcount or 0)
-
-
-def assign_common_accounts_to_worker(
-    config: Config,
-    *,
-    worker_id: int,
-    source_stage: str,
-    amount: int,
-) -> int:
-    if source_stage not in {"nereg", "reg"}:
-        raise ValueError("unknown account stage")
-    if amount <= 0:
-        return 0
-    with connect(config) as connection:
-        rows = connection.execute(
-            """
-            SELECT id FROM accounts
-            WHERE worker_id IS NULL AND account_stage = ?
-            ORDER BY id DESC
-            LIMIT ?
-            """,
-            (source_stage, amount),
-        ).fetchall()
-        ids = [row["id"] for row in rows]
-        if not ids:
-            return 0
-        placeholders = ", ".join("?" for _ in ids)
-        cursor = connection.execute(
-            f"""
-            UPDATE accounts
-            SET worker_id = ?, department_id = NULL, updated_at = datetime('now')
-            WHERE id IN ({placeholders})
-            """,
-            (worker_id, *ids),
-        )
-        return int(cursor.rowcount or 0)
 
 
 def delete_account_row(config: Config, account_id: int) -> None:
@@ -288,158 +233,26 @@ def delete_account_row(config: Config, account_id: int) -> None:
         connection.execute("DELETE FROM accounts WHERE id = ?", (account_id,))
 
 
-def delete_accounts_by_scope(
+def delete_accounts_by_stage(
     config: Config,
     *,
-    worker_id: int | None,
     account_stage: str,
+    registration_service: str | None = None,
+    excluded_registration_service: str | None = None,
 ) -> int:
     if account_stage not in {"nereg", "reg"}:
         raise ValueError("unknown account stage")
-    if worker_id is None:
-        where = "worker_id IS NULL AND account_stage = ?"
-        params: tuple[Any, ...] = (account_stage,)
-    else:
-        where = "worker_id = ? AND account_stage = ?"
-        params = (worker_id, account_stage)
+    clauses = ["account_stage = ?"]
+    params: list[Any] = [account_stage]
+    if registration_service is not None:
+        clauses.append("instr(',' || coalesce(nullif(registration_services, ''), registration_service, '') || ',', ?) > 0")
+        params.append(f",{registration_service},")
+    if excluded_registration_service is not None:
+        clauses.append("instr(',' || coalesce(nullif(registration_services, ''), registration_service, '') || ',', ?) = 0")
+        params.append(f",{excluded_registration_service},")
     with connect(config) as connection:
         cursor = connection.execute(
-            f"DELETE FROM accounts WHERE {where}",
+            f"DELETE FROM accounts WHERE {' AND '.join(clauses)}",
             params,
         )
         return int(cursor.rowcount or 0)
-
-
-def add_worker(
-    config: Config,
-    *,
-    name: str,
-    telegram_id: int | None,
-    department_id: int | None,
-    created_at: str,
-) -> int:
-    with connect(config) as connection:
-        cursor = connection.execute(
-            "INSERT INTO workers (telegram_id, name, department_id, created_at) VALUES (?, ?, ?, ?)",
-            (telegram_id, name, department_id, created_at),
-        )
-        return int(cursor.lastrowid)
-
-
-def update_worker_name(config: Config, worker_id: int, name: str) -> None:
-    with connect(config) as connection:
-        connection.execute(
-            "UPDATE workers SET name = ? WHERE id = ?",
-            (name, worker_id),
-        )
-
-
-def list_workers(config: Config) -> list[sqlite3.Row]:
-    with connect(config) as connection:
-        return connection.execute("SELECT * FROM workers ORDER BY id DESC").fetchall()
-
-
-def get_worker(config: Config, worker_id: int) -> sqlite3.Row | None:
-    with connect(config) as connection:
-        return connection.execute("SELECT * FROM workers WHERE id = ?", (worker_id,)).fetchone()
-
-
-def get_worker_by_telegram_id(config: Config, telegram_id: int) -> sqlite3.Row | None:
-    with connect(config) as connection:
-        return connection.execute("SELECT * FROM workers WHERE telegram_id = ?", (telegram_id,)).fetchone()
-
-
-def worker_exists(config: Config, worker_id: int) -> bool:
-    with connect(config) as connection:
-        row = connection.execute("SELECT 1 FROM workers WHERE id = ?", (worker_id,)).fetchone()
-    return row is not None
-
-
-def delete_worker(config: Config, worker_id: int) -> None:
-    with connect(config) as connection:
-        connection.execute("UPDATE accounts SET worker_id = NULL, department_id = NULL WHERE worker_id = ?", (worker_id,))
-        connection.execute("UPDATE proxies SET worker_id = NULL, status = 'stored' WHERE worker_id = ? AND status = 'assigned'", (worker_id,))
-        connection.execute("UPDATE proxies SET worker_id = NULL WHERE worker_id = ? AND status = 'used'", (worker_id,))
-        connection.execute("DELETE FROM workers WHERE id = ?", (worker_id,))
-
-
-def assign_account_to_worker(config: Config, account_id: int, worker_id: int | None) -> None:
-    with connect(config) as connection:
-        connection.execute(
-            "UPDATE accounts SET worker_id = ?, department_id = ?, updated_at = datetime('now') WHERE id = ?",
-            (worker_id, None, account_id),
-        )
-
-
-def add_proxy(config: Config, proxy: str, created_at: str) -> int:
-    with connect(config) as connection:
-        cursor = connection.execute(
-            "INSERT INTO proxies (proxy, created_at) VALUES (?, ?)",
-            (proxy, created_at),
-        )
-        return int(cursor.lastrowid)
-
-
-def list_available_proxies(config: Config, limit: int = 50) -> list[sqlite3.Row]:
-    with connect(config) as connection:
-        return connection.execute(
-            "SELECT * FROM proxies WHERE worker_id IS NULL AND status = 'stored' ORDER BY id ASC LIMIT ?",
-            (limit,),
-        ).fetchall()
-
-
-def count_available_proxies(config: Config) -> int:
-    with connect(config) as connection:
-        return int(
-            connection.execute(
-                "SELECT COUNT(*) FROM proxies WHERE worker_id IS NULL AND status = 'stored'",
-            ).fetchone()[0]
-        )
-
-
-def count_worker_proxies(config: Config, worker_id: int, status: str | None = None) -> int:
-    params: list[Any] = [worker_id]
-    clause = "worker_id = ?"
-    if status is not None:
-        clause += " AND status = ?"
-        params.append(status)
-    with connect(config) as connection:
-        return int(connection.execute(f"SELECT COUNT(*) FROM proxies WHERE {clause}", params).fetchone()[0])
-
-
-def assign_available_proxies_to_worker(config: Config, worker_id: int, amount: int) -> int:
-    if amount <= 0:
-        return 0
-    with connect(config) as connection:
-        connection.execute(
-            "UPDATE proxies SET worker_id = NULL WHERE worker_id = ? AND status = 'used'",
-            (worker_id,),
-        )
-        rows = connection.execute(
-            "SELECT id FROM proxies WHERE worker_id IS NULL AND status = 'stored' ORDER BY id ASC LIMIT ?",
-            (amount,),
-        ).fetchall()
-        ids = [row["id"] for row in rows]
-        if not ids:
-            return 0
-        placeholders = ", ".join("?" for _ in ids)
-        cursor = connection.execute(
-            f"UPDATE proxies SET worker_id = ?, status = 'assigned' WHERE id IN ({placeholders})",
-            (worker_id, *ids),
-        )
-        return int(cursor.rowcount or 0)
-
-
-def pop_worker_proxy(config: Config, worker_id: int) -> sqlite3.Row | None:
-    with connect(config) as connection:
-        row = connection.execute(
-            "SELECT * FROM proxies WHERE worker_id = ? AND status = 'assigned' ORDER BY id ASC LIMIT 1",
-            (worker_id,),
-        ).fetchone()
-        if not row:
-            return None
-        connection.execute(
-            "UPDATE proxies SET status = 'used' WHERE id = ?",
-            (row["id"],),
-        )
-        return row
