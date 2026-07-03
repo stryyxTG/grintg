@@ -107,30 +107,41 @@ def accounts_page_keyboard(
     pages = max(1, ceil(total / ACCOUNTS_PER_PAGE))
     prev_page = max(0, page - 1)
     next_page = min(pages - 1, page + 1)
+    nav_count = 0
     if page > 0:
         builder.button(text="‹ Назад", callback_data=f"accounts:page:{origin}:{ref_id}:{prev_page}")
+        nav_count += 1
     builder.button(text=f"{page + 1}/{pages}", callback_data="noop")
+    nav_count += 1
     if page + 1 < pages:
         builder.button(text="Вперед ›", callback_data=f"accounts:page:{origin}:{ref_id}:{next_page}")
+        nav_count += 1
 
+    action_count = 0
     if origin in {"common_nereg", "common_reg"} and total > 0:
         stage = "nereg" if origin == "common_nereg" else "reg"
         builder.button(text="Выдать воркеру", callback_data=f"accounts:bulk_assign:{stage}")
         builder.button(text="Скачать ZIP", callback_data=f"accounts:zip_common:{stage}")
         builder.button(text="Удалить весь раздел", callback_data=f"accounts:delete_common_ask:{stage}")
+        action_count += 3
 
     if origin == "worker":
         builder.button(text="К воркерам", callback_data="accounts:worker_storage")
+        action_count += 1
     elif origin in {"worker_nereg", "worker_reg"}:
         stage = "nereg" if origin == "worker_nereg" else "reg"
         if total > 0:
             builder.button(text="Массово вернуть в общее", callback_data=f"worker:bulk_return:{ref_id}:{stage}")
             builder.button(text="Удалить весь раздел", callback_data=f"accounts:delete_worker_stage_ask:{ref_id}:{stage}")
+            action_count += 2
         builder.button(text="К разделам воркера", callback_data=f"worker:account_sections:{ref_id}")
+        action_count += 1
     elif origin in {"common_nereg", "common_reg"}:
         builder.button(text="К разделам общего", callback_data="accounts:common_sections")
+        action_count += 1
     builder.button(text="Меню аккаунтов", callback_data="accounts:menu")
-    builder.adjust(*([1] * len(accounts)), 3, 1, 1)
+    action_count += 1
+    builder.adjust(*([1] * len(accounts)), nav_count, *([1] * action_count))
     return builder.as_markup()
 
 
@@ -430,13 +441,17 @@ def worker_self_accounts_page_keyboard(
         )
 
     pages = max(1, ceil(total / ACCOUNTS_PER_PAGE))
+    nav_count = 0
     if page > 0:
         builder.button(text="‹ Назад", callback_data=f"worker:self:page:{stage}:{page - 1}")
+        nav_count += 1
     builder.button(text=f"{page + 1}/{pages}", callback_data="noop")
+    nav_count += 1
     if page + 1 < pages:
         builder.button(text="Вперед ›", callback_data=f"worker:self:page:{stage}:{page + 1}")
+        nav_count += 1
     builder.button(text="Мое хранилище", callback_data="worker:self:menu")
-    builder.adjust(*([1] * len(accounts)), 3, 1)
+    builder.adjust(*([1] * len(accounts)), nav_count, 1)
     return builder.as_markup()
 
 
