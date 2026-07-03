@@ -123,7 +123,9 @@ def accounts_page_keyboard(
         builder.button(text="К воркерам", callback_data="accounts:worker_storage")
     elif origin in {"worker_nereg", "worker_reg"}:
         stage = "nereg" if origin == "worker_nereg" else "reg"
-        builder.button(text="Массово вернуть в общее", callback_data=f"worker:bulk_return:{ref_id}:{stage}")
+        if total > 0:
+            builder.button(text="Массово вернуть в общее", callback_data=f"worker:bulk_return:{ref_id}:{stage}")
+            builder.button(text="Удалить весь раздел", callback_data=f"accounts:delete_worker_stage_ask:{ref_id}:{stage}")
         builder.button(text="К разделам воркера", callback_data=f"worker:account_sections:{ref_id}")
     elif origin in {"common_nereg", "common_reg"}:
         builder.button(text="К разделам общего", callback_data="accounts:common_sections")
@@ -158,7 +160,7 @@ def account_detail_menu(
             text="Пометить зареганным",
             callback_data=f"account:stage_ask1:{account_id}:reg:{origin}:{ref_id}:{page}",
         )
-    if origin in {"common", "common_nereg", "common_reg"}:
+    if origin in {"common", "common_nereg", "common_reg", "worker", "worker_nereg", "worker_reg"}:
         builder.button(text="Удалить аккаунт", callback_data=f"account:delete_ask:{account_id}:{origin}:{ref_id}:{page}")
     builder.button(text="Назад", callback_data=back)
     builder.adjust(1)
@@ -195,6 +197,14 @@ def confirm_delete_common_stage_menu(stage: str) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     builder.button(text="ДА, УДАЛИТЬ ВСЕ", callback_data=f"accounts:delete_common_confirm:{stage}")
     builder.button(text="Отмена", callback_data=f"accounts:page:common_{stage}:0:0")
+    builder.adjust(1)
+    return builder.as_markup()
+
+
+def confirm_delete_worker_stage_menu(worker_id: int, stage: str) -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    builder.button(text="ДА, УДАЛИТЬ ВСЕ", callback_data=f"accounts:delete_worker_stage_confirm:{worker_id}:{stage}")
+    builder.button(text="Отмена", callback_data=f"accounts:page:worker_{stage}:{worker_id}:0")
     builder.adjust(1)
     return builder.as_markup()
 

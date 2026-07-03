@@ -60,6 +60,7 @@ from tglol.keyboards import (
     confirm_account_stage_menu,
     confirm_delete_account_menu,
     confirm_delete_common_stage_menu,
+    confirm_delete_worker_stage_menu,
     confirm_worker_account_stage_menu,
     confirm_delete_worker_menu,
     digit_code_keyboard,
@@ -1437,8 +1438,14 @@ async def ask_delete_account(callback: CallbackQuery, config: Config) -> None:
     if not account:
         await callback.answer("Аккаунт не найден.", show_alert=True)
         return
-    if account.worker_id is not None:
-        await callback.answer("Удалять можно только из общего хранилища.", show_alert=True)
+    if origin in {"common", "common_nereg", "common_reg"} and account.worker_id is not None:
+        await callback.answer("Этот аккаунт уже не в общем хранилище.", show_alert=True)
+        return
+    if origin in {"worker", "worker_nereg", "worker_reg"} and account.worker_id != int(raw_ref):
+        await callback.answer("Этот аккаунт уже не у выбранного воркера.", show_alert=True)
+        return
+    if origin not in {"common", "common_nereg", "common_reg", "worker", "worker_nereg", "worker_reg"}:
+        await callback.answer("Удаление здесь недоступно.", show_alert=True)
         return
     await callback.message.edit_text(
         "ВЫ УВЕРЕНЫ ЧТО ХОТИТЕ УДАЛИТЬ АККАУНТ И ЕГО ФАЙЛЫ С СЕРВЕРА?",
@@ -1449,17 +1456,46 @@ async def ask_delete_account(callback: CallbackQuery, config: Config) -> None:
 
 @router.callback_query(F.data.startswith("account:delete_confirm:"))
 async def confirm_delete_account(callback: CallbackQuery, config: Config) -> None:
-    _, _, raw_account_id, origin, _raw_ref, _raw_page = callback.data.split(":", 5)
+    _, _, raw_account_id, origin, raw_ref, _raw_page = callback.data.split(":", 5)
     account = get_account(config, int(raw_account_id))
     if not account:
         await callback.answer("Аккаунт не найден.", show_alert=True)
         return
-    if account.worker_id is not None:
-        await callback.answer("Удалять можно только из общего хранилища.", show_alert=True)
+    if origin in {"common", "common_nereg", "common_reg"} and account.worker_id is not None:
+        await callback.answer("Этот аккаунт уже не в общем хранилище.", show_alert=True)
+        return
+    if origin in {"worker", "worker_nereg", "worker_reg"} and account.worker_id != int(raw_ref):
+        await callback.answer("Этот аккаунт уже не у выбранного воркера.", show_alert=True)
+        return
+    if origin not in {"common", "common_nereg", "common_reg", "worker", "worker_nereg", "worker_reg"}:
+        await callback.answer("Удаление здесь недоступно.", show_alert=True)
         return
     stage = account.account_stage
     removed_files = _delete_local_account_files(config, [account])
     delete_account_row(config, account.id)
+    if origin in {"worker", "worker_nereg", "worker_reg"}:
+        worker_id = int(raw_ref)
+        worker = get_worker(config, worker_id)
+        if not worker:
+            await callback.message.edit_text(
+                f"Аккаунт #{account.id} удален из бота.\nФайлов удалено с сервера: {removed_files}",
+                reply_markup=accounts_menu(),
+            )
+            await callback.answer(f"Удалено из {_stage_title(stage)}.")
+            return
+        _, nereg_count, reg_count = _worker_account_counts(config, worker)
+        await callback.message.edit_text(
+            (
+                f"Аккаунт #{account.id} удален из хранилища воркера.\n"
+                f"Файлов удалено с сервера: {removed_files}\n\n"
+                f"Хранилище воркера\n{_worker_name(worker)}\n\n"
+                f"НЕРЕГ: {nereg_count}\n"
+                f"РЕГ: {reg_count}"
+            ),
+            reply_markup=worker_account_sections_menu(worker_id, nereg_count=nereg_count, reg_count=reg_count),
+        )
+        await callback.answer(f"Удалено из {_stage_title(stage)}.")
+        return
     nereg_count, reg_count = _common_account_counts(config)
     await callback.message.edit_text(
         (
@@ -1512,6 +1548,65 @@ async def confirm_delete_common_stage(callback: CallbackQuery, config: Config) -
         reply_markup=common_storage_sections_menu(nereg_count=nereg_count, reg_count=reg_count),
     )
     await callback.answer("Раздел очищен.")
+
+
+@router.callback_query(F.data.startswith("accounts:delete_worker_stage_ask:"))
+async def ask_delete_worker_stage(callback: CallbackQuery, config: Config) -> None:
+    _, _, raw_worker_id, stage = callback.data.split(":", 3)
+    if stage not in {"nereg", "reg"}:
+        await callback.answer("Неизвестный раздел.", show_alert=True)
+        return
+    worker_id = int(raw_worker_id)
+    worker = get_worker(config, worker_id)
+    if not worker:
+        await callback.answer("Воркер не найден.", show_alert=True)
+        return
+    total = count_accounts_by_stage(config, worker_id=worker_id, account_stage=stage)
+    if not total:
+        await callback.answer("В этом разделе нет аккаунтов.", show_alert=True)
+        return
+    await callback.message.edit_text(
+        (
+            f"ВЫ УВЕРЕНЫ ЧТО ХОТИТЕ УДАЛИТЬ ВЕСЬ {_stage_title(stage)} У ВОРКЕРА?\n"
+            f"Воркер: {_worker_name(worker)}\n"
+            f"Аккаунтов: {total}\n"
+            "Файлы будут удалены только с сервера."
+        ),
+        reply_markup=confirm_delete_worker_stage_menu(worker_id, stage),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("accounts:delete_worker_stage_confirm:"))
+async def confirm_delete_worker_stage(callback: CallbackQuery, config: Config) -> None:
+    _, _, raw_worker_id, stage = callback.data.split(":", 3)
+    if stage not in {"nereg", "reg"}:
+        await callback.answer("Неизвестный раздел.", show_alert=True)
+        return
+    worker_id = int(raw_worker_id)
+    worker = get_worker(config, worker_id)
+    if not worker:
+        await callback.answer("Воркер не найден.", show_alert=True)
+        return
+    accounts = list_accounts_by_scope(config, worker_id=worker_id, account_stage=stage)
+    if not accounts:
+        await callback.answer("В этом разделе нет аккаунтов.", show_alert=True)
+        return
+    removed_files = _delete_local_account_files(config, accounts)
+    removed_rows = delete_accounts_by_scope(config, worker_id=worker_id, account_stage=stage)
+    _, nereg_count, reg_count = _worker_account_counts(config, worker)
+    await callback.message.edit_text(
+        (
+            f"{_stage_title(stage)} воркера очищен.\n"
+            f"Аккаунтов удалено из бота: {removed_rows}\n"
+            f"Файлов удалено с сервера: {removed_files}\n\n"
+            f"Хранилище воркера\n{_worker_name(worker)}\n\n"
+            f"НЕРЕГ: {nereg_count}\n"
+            f"РЕГ: {reg_count}"
+        ),
+        reply_markup=worker_account_sections_menu(worker_id, nereg_count=nereg_count, reg_count=reg_count),
+    )
+    await callback.answer("Раздел воркера очищен.")
 
 
 @router.callback_query(F.data.startswith("worker:bulk_return:"))
