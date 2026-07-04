@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 import logging
 from pathlib import Path
 import re
@@ -16,6 +17,7 @@ CODE_CONTEXT_RE = re.compile(r"\b(code|verification|verify|otp|passcode|паро
 TELEGRAM_CODE_PEERS = (777000, "Telegram")
 VERIFICATION_CODE_PEERS = ("@VerificationCodes", "VerificationCodes")
 VERIFICATION_CODE_DIALOG_NAMES = ("Verification Codes", "VerificationCodes")
+VERIFICATION_CODE_MAX_AGE = timedelta(minutes=15)
 logger = logging.getLogger(__name__)
 
 
@@ -197,6 +199,14 @@ def _entity_key(entity) -> tuple[str, int | str]:
     return type(entity).__name__, getattr(entity, "id", repr(entity))
 
 
+def _message_is_fresh(message_date, max_age: timedelta | None) -> bool:
+    if max_age is None or message_date is None:
+        return True
+    if message_date.tzinfo is None:
+        message_date = message_date.replace(tzinfo=timezone.utc)
+    return datetime.now(timezone.utc) - message_date <= max_age
+
+
 async def _resolve_code_entities(
     client: TelegramClient,
     *,
@@ -243,6 +253,7 @@ async def _get_latest_code_from_peers(
     dialog_names: tuple[str, ...] = (),
     limit: int = 15,
     require_context: bool = True,
+    max_age: timedelta | None = None,
 ) -> str | None:
     client = client_for(session_path, api_id, api_hash, runtime)
     await client.connect()
@@ -257,6 +268,8 @@ async def _get_latest_code_from_peers(
         for entity in entities:
             try:
                 async for message in client.iter_messages(entity, limit=limit):
+                    if not _message_is_fresh(message.date, max_age):
+                        break
                     text = message.message or ""
                     codes = extract_verification_codes(text, require_context=require_context)
                     if codes:
@@ -296,7 +309,7 @@ async def get_latest_verification_code(
     api_hash: str,
     runtime: dict[str, str],
     *,
-    limit: int = 30,
+    limit: int = 8,
 ) -> str | None:
     return await _get_latest_code_from_peers(
         session_path,
@@ -307,4 +320,5 @@ async def get_latest_verification_code(
         dialog_names=VERIFICATION_CODE_DIALOG_NAMES,
         limit=limit,
         require_context=False,
+        max_age=VERIFICATION_CODE_MAX_AGE,
     )

@@ -891,7 +891,7 @@ async def _send_account_code(callback: CallbackQuery, config: Config, *, verific
         if verification:
             code = await get_latest_verification_code(session_path, api_id, api_hash, runtime)
             title = "Verification Code"
-            not_found = "Verification code не найден в последних сообщениях."
+            not_found = "Свежий Verification Code не найден в последних сообщениях."
         else:
             code = await get_latest_telegram_code(session_path, api_id, api_hash, runtime)
             title = "Код Telegram"
